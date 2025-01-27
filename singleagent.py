@@ -42,20 +42,31 @@ class TwoVehiclesEnv(gym.Env):
         self.state = None
 
     def _get_scenario(self, scenario):
-        """
-        Defines different start and goal states for various scenarios.
-        """
-        if scenario == 1:
-            # Scenario 1: Challenging diagonal crossing
-            start_states = np.array([0.6, 0.6, np.pi/4])
-            goal_states = np.array([0.89, 0.89])
-        elif scenario == 2:
-            # Scenario 2: Opposite diagonal crossing
-            start_states = np.array([0.64, 0.64])
-            goal_states = np.array([0.93, 0.90])
-        else:
-            raise ValueError("Invalid scenario! Choose scenario 1 or 2.")
-        return start_states, goal_states
+            """
+            Defines different start and goal states for various scenarios.
+            """
+            if scenario == 1:
+                # Scenario 1: Challenging diagonal crossing
+                start_states = np.array([
+                        np.random.uniform(0.5, 1.0),  # Random x1
+                        np.random.uniform(0.5, 1.0),  # Random y1
+                        np.random.uniform(0, 2 * np.pi)  # Random θ1
+                    ])
+                goal_states = np.array([0.89, 0.89])
+
+            elif scenario == 2:
+                # Scenario 2: Opposite diagonal crossing
+                start_states = np.array([
+                        np.random.uniform(0.5, 1.0),  # Random x1
+                        np.random.uniform(0.5, 1.0),  # Random y1
+                        np.random.uniform(0, 2 * np.pi)  # Random θ1
+                    ])
+                goal_states = np.array([0.93, 0.90])
+            else:
+                raise ValueError("Invalid scenario! Choose scenario 1 or 2.")
+            
+            self.state = start_states.copy()
+            return start_states, goal_states
 
     def reset(self):
         """
@@ -332,6 +343,7 @@ ax_agents.set_ylabel("Y")
 
 # Main training loop
 for episode in range(50):
+    env = TwoVehiclesEnv(scenario=scenario)
     state = env.reset()
     episode_reward = 0
 
