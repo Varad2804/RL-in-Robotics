@@ -11,6 +11,7 @@ import signal
 import sys
 import matplotlib.pyplot as plt
 from collections import deque
+import os
 
 
 torch.backends.cudnn.deterministic = True
@@ -76,12 +77,6 @@ class SACActor(nn.Module):
     def get_action(self, state):
         mean, log_std = self(state)
         std = log_std.exp()
-        # with torch.no_grad():
-        #     mean_of_mean = mean.mean()
-        #     mean_of_std = std.mean()
-        #     # print(f"Mean : {mean_of_mean.item():.2f}")
-            # print(f"Standard Deviation : {mean_of_std.item():.2f}")
-
 
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()
@@ -119,13 +114,16 @@ class SAC:
         self.tau = 0.005
         self.policy_freq = 2
 
+        # Load from checkpoint if it exists
+        self.load_checkpoint("sac_checkpoint.pth")
+        self.alpha = self.log_alpha.exp().item()
+
     def select_action(self, state):
+        print(f"alpha values : {self.alpha}")
         with torch.no_grad():  # No need to track gradients during inference
             state = torch.FloatTensor(state.reshape(1, -1)).to(device)
             action, _ = self.actor.get_action(state)
-            # print(f"angular velocity  : f{action}")
         return action.detach().cpu().numpy().flatten()
-
 
     def soft_update(self):
         # Soft update target networks using the τ coefficient
@@ -190,13 +188,48 @@ class SAC:
             # Perform the soft update of target networks
         self.soft_update()
 
+    def save_checkpoint(self, filename):
+        checkpoint = {
+            'actor_state_dict': self.actor.state_dict(),
+            'qf1_state_dict': self.qf1.state_dict(),
+            'qf2_state_dict': self.qf2.state_dict(),
+            'qf1_target_state_dict': self.qf1_target.state_dict(),
+            'qf2_target_state_dict': self.qf2_target.state_dict(),
+            'actor_optimizer_state_dict': self.actor_optimizer.state_dict(),
+            'q_optimizer_state_dict': self.q_optimizer.state_dict(),
+            'a_optimizer_state_dict': self.a_optimizer.state_dict(),
+            'log_alpha': self.log_alpha,  # Note: log_alpha is a torch.Tensor with grad enabled
+            'global_steps': global_steps,
+        }
+        torch.save(checkpoint, filename)
+        print("Checkpoint saved.")
+
+    def load_checkpoint(self, filename):
+        if os.path.exists(filename):
+            checkpoint = torch.load(filename, map_location=device)
+            self.actor.load_state_dict(checkpoint['actor_state_dict'])
+            self.qf1.load_state_dict(checkpoint['qf1_state_dict'])
+            self.qf2.load_state_dict(checkpoint['qf2_state_dict'])
+            self.qf1_target.load_state_dict(checkpoint['qf1_target_state_dict'])
+            self.qf2_target.load_state_dict(checkpoint['qf2_target_state_dict'])
+
+            self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])
+            self.q_optimizer.load_state_dict(checkpoint['q_optimizer_state_dict'])
+            self.a_optimizer.load_state_dict(checkpoint['a_optimizer_state_dict'])
+            self.log_alpha = checkpoint['log_alpha']
+            global_steps = checkpoint['global_steps']
+            print("Checkpoint loaded.")
+
+        else:
+            print("No checkpoint found. Starting training from scratch.")
+
 
 # ---- Custom Environment: TwoVehiclesEnv ---- #
 class TwoVehiclesEnv(gym.Env):
     def __init__(self, scenario=1):
         super(TwoVehiclesEnv, self).__init__()
-        self.observation_space = Box(low=np.array([0.3, 0.3, 0]),
-                                     high=np.array([1, 1, 2 * np.pi]),
+        self.observation_space = Box(low=np.array([0.1, 0.1, 0 , -np.pi]),
+                                     high=np.array([1, 1, 2 * np.pi , np.pi]),
                                      dtype=np.float32)
         self.action_space = Box(low=np.array([-0.98]),
                                 high=np.array([0.98]),
@@ -205,7 +238,7 @@ class TwoVehiclesEnv(gym.Env):
         self.dt = 0.1
         self.alpha = 10
         self.gamma = 0
-        self.epsilon2 = 0.07
+        self.epsilon2 = 0.04
         self.scenario = scenario
         self.start_state, self.goal_state = self._get_scenario(scenario)
         self.state = None
@@ -213,53 +246,61 @@ class TwoVehiclesEnv(gym.Env):
     def _get_scenario(self, scenario):
         if scenario == 1:
             start_state = np.array([
-                np.random.uniform(0.45, 0.85),
-                np.random.uniform(0.45, 0.85),
+                np.random.uniform(0.1, 1.0),
+                np.random.uniform(0.1, 1.0),
                 np.random.uniform(0, 2 * np.pi)
             ])
-            goal_state = np.array([0.89, 0.89])
-        elif scenario == 2:
-                # Scenario 2: Opposite diagonal crossing
-                start_state = np.array([
-                        np.random.uniform(0.45, 0.85),  # Random x1
-                        np.random.uniform(0.45, 0.85),  # Random y1
-                        np.random.uniform(0, 2 * np.pi)  # Random θ1
-                    ])
-                goal_state = np.array([0.93, 0.90])
-        else:
-            raise ValueError("Invalid scenario! Choose scenario 1 or 2.")
         
+        while True:
+            goal_state = np.array([
+                np.random.uniform(0.1, 1.0),  # Random goal x
+                np.random.uniform(0.1, 1.0)   # Random goal y
+            ])
+            if np.linalg.norm(goal_state - start_state[:2]) > 0.2:
+                break  # Ensure the goal is not too close to the start
+        
+        self.goal_state = goal_state
         return start_state, goal_state
 
     def reset(self):
         self.start_state, self.goal_state = self._get_scenario(self.scenario)
-        self.state = self.start_state.copy()
+        x1, y1, θ1 = self.start_state
+        gx1, gy1 = self.goal_state
+        θ_goal = math.atan2(gy1 - y1, gx1 - x1)
+        angular_diff = ((θ_goal - θ1 + np.pi) % (2 * np.pi)) - np.pi
+        self.state  = np.array([x1, y1, θ1 , angular_diff])
         return self.state , self.goal_state
 
     def step(self, action):
-        x1, y1, θ1 = self.state
+        x1, y1, θ1 , angular_diff = self.state
+        gx1, gy1 = self.goal_state
+        
         delta_x = self.v * np.cos(θ1) * self.dt
         delta_y = self.v * np.sin(θ1) * self.dt
-        new_x1 = max(0.30, min(1.0, x1 + delta_x))
-        new_y1 = max(0.30, min(1.0, y1 + delta_y))
+        new_x1 = max(0.1, min(1.0, x1 + delta_x))
+        new_y1 = max(0.1, min(1.0, y1 + delta_y))
         θ1 = (θ1 + float(action) * self.dt) % (2 * np.pi)
-        self.state = np.array([new_x1, new_y1, θ1])
+
+        θ_goal = math.atan2(gy1 - new_y1, gx1 - new_x1)
+        angular_diff = ((θ_goal - θ1 + np.pi) % (2 * np.pi)) - np.pi
+
+        self.state = np.array([new_x1, new_y1, θ1 , angular_diff])
         reward = self._compute_reward()
         done = reward == 250
-        # done = reward == 250 or reward==
         return self.state, reward, done, {}
 
     def _compute_reward(self):
-        x1, y1, θ1 = self.state
+        x1, y1, θ1 , angular_diff = self.state
         gx1, gy1 = self.goal_state
         distance_to_goal = np.sqrt((gx1 - x1) ** 2 + (gy1 - y1) ** 2)
         if distance_to_goal <= self.epsilon2:
             return 250
-        if x1 <= 0.3 or x1 >= 1.0 or y1 <= 0.3 or y1 >= 1.0:
-            return -200  # Heavy Penalty for going out of bounds
-        θ_goal = math.atan2(gy1 - y1, gx1 - x1)
-        angular_diff = abs(((θ_goal - θ1 + np.pi) % (2 * np.pi)) - np.pi )
-        scaled_angular_diff = round(angular_diff / np.pi, 2)
+        if x1 <= 0.1 or x1 >= 1.0 or y1 <= 0.1 or y1 >= 1.0:
+            return -20  # Heavy Penalty for going out of bounds
+        # angular_diff = abs(((θ_goal - θ1 + np.pi) % (2 * np.pi)) - np.pi )
+        print(f"angular diff {angular_diff}")
+        scaled_angular_diff = round(abs(angular_diff) / np.pi, 2)
+        print(f"scaled angular diff {scaled_angular_diff}")
         reward = (
             - self.alpha * scaled_angular_diff # Scaled orientation reward
             - self.gamma                         # Step penalty
@@ -294,20 +335,21 @@ ax_rewards.set_title("Dynamic Plot of Total Reward per Episode")
 
 # Real-time agent movement visualization setup
 fig_agents, ax_agents = plt.subplots(figsize=(6, 6))
-ax_agents.set_xlim(0.3, 1)
-ax_agents.set_ylim(0.3, 1)
+ax_agents.set_xlim(0.1, 1)
+ax_agents.set_ylim(0.1, 1)
 ax_agents.set_title("Agent Simulation During Training")
 ax_agents.set_xlabel("X")
 ax_agents.set_ylabel("Y")
 
 
-for episode in range(500):
+for episode in range(2000):
+    env = TwoVehiclesEnv(scenario=1)
     state , goal_state = env.reset()
     episode_reward = 0
 
     ax_agents.clear()
-    ax_agents.set_xlim(0.3, 1)
-    ax_agents.set_ylim(0.3, 1)
+    ax_agents.set_xlim(0.1, 1)
+    ax_agents.set_ylim(0.1, 1)
     ax_agents.set_title(f"Episode {episode + 1}: Agent Simulation")
     ax_agents.set_xlabel("X")
     ax_agents.set_ylabel("Y")
@@ -330,8 +372,8 @@ for episode in range(500):
         positions1[1].append(next_state[1])
 
         ax_agents.clear()
-        ax_agents.set_xlim(0.3, 1)
-        ax_agents.set_ylim(0.3, 1)
+        ax_agents.set_xlim(0.1, 1)
+        ax_agents.set_ylim(0.1, 1)
         ax_agents.set_title(f"Episode {episode + 1}: Agent Simulation")
         ax_agents.set_xlabel("X")
         ax_agents.set_ylabel("Y")
@@ -361,6 +403,10 @@ for episode in range(500):
     except KeyboardInterrupt:
         signal_handler(None, None)
     print(f"Episode {episode + 1}: Reward = {episode_reward}")
+    
+    # Save checkpoint after every 20 episodes
+    if (episode + 1) % 2 == 0:
+        sac_agent.save_checkpoint("sac_checkpoint.pth")
 
 plt.ioff()
 while True:
@@ -368,22 +414,4 @@ while True:
     if user_input == "1":
         plt.close('all')
         break
-
-# At some point after training, save your checkpoint:
-checkpoint = {
-    'actor_state_dict': sac_agent.actor.state_dict(),
-    'qf1_state_dict': sac_agent.qf1.state_dict(),
-    'qf2_state_dict': sac_agent.qf2.state_dict(),
-    'qf1_target_state_dict': sac_agent.qf1_target.state_dict(),
-    'qf2_target_state_dict': sac_agent.qf2_target.state_dict(),
-    'actor_optimizer_state_dict': sac_agent.actor_optimizer.state_dict(),
-    'q_optimizer_state_dict': sac_agent.q_optimizer.state_dict(),
-    'a_optimizer_state_dict': sac_agent.a_optimizer.state_dict(),
-    'log_alpha': sac_agent.log_alpha,  # Note: log_alpha is a torch.Tensor with grad enabled
-    'global_steps': global_steps,
-}
-
-torch.save(checkpoint, "sac_checkpoint.pth")
-print("Checkpoint saved.")
-
 
