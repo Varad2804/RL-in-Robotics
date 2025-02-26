@@ -40,7 +40,6 @@ class ReplayBuffer:
 LOG_STD_MAX = 2
 LOG_STD_MIN = -5
 
-
 class SoftQNetwork(nn.Module):
     def __init__(self, state_dim, action_dim):
         super().__init__()
@@ -235,6 +234,7 @@ class TwoVehiclesEnv(gym.Env):
                                 high=np.array([0.98]),
                                 dtype=np.float32)
         self.v = 0.05
+        self.v1=0.0
         self.dt = 0.1
         self.alpha = 10
         self.gamma = 0
@@ -254,9 +254,10 @@ class TwoVehiclesEnv(gym.Env):
         while True:
             goal_state = np.array([
                 np.random.uniform(0.1, 1.0),  # Random goal x
-                np.random.uniform(0.1, 1.0)   # Random goal y
+                np.random.uniform(0.1, 1.0),
+                np.random.uniform(0, 2 * np.pi)   # Random goal y
             ])
-            if np.linalg.norm(goal_state - start_state[:2]) > 0.2:
+            if np.linalg.norm(goal_state[:2] - start_state[:2]) > 0.2:
                 break  # Ensure the goal is not too close to the start
         
         self.goal_state = goal_state
@@ -265,7 +266,7 @@ class TwoVehiclesEnv(gym.Env):
     def reset(self):
         self.start_state, self.goal_state = self._get_scenario(self.scenario)
         x1, y1, θ1 = self.start_state
-        gx1, gy1 = self.goal_state
+        gx1, gy1,gθ1 = self.goal_state
         θ_goal = math.atan2(gy1 - y1, gx1 - x1)
         angular_diff = ((θ_goal - θ1 + np.pi) % (2 * np.pi)) - np.pi
         self.state  = np.array([x1, y1, θ1 , angular_diff])
@@ -273,10 +274,14 @@ class TwoVehiclesEnv(gym.Env):
 
     def step(self, action):
         x1, y1, θ1 , angular_diff = self.state
-        gx1, gy1 = self.goal_state
+        gx1, gy1,gθ1 = self.goal_state
         
         delta_x = self.v * np.cos(θ1) * self.dt
         delta_y = self.v * np.sin(θ1) * self.dt
+        delta_x1= self.v1*np.cos(gθ1)*self.dt
+        delta_y1= self.v1*np.sin(gθ1)*self.dt
+        self.goal_state[0]=max(0.1,min(1.0, gx1+delta_x1))
+        self.goal_state[1]=max(0.1,min(1.0, gy1+delta_y1))
         new_x1 = max(0.1, min(1.0, x1 + delta_x))
         new_y1 = max(0.1, min(1.0, y1 + delta_y))
         θ1 = (θ1 + float(action) * self.dt) % (2 * np.pi)
@@ -291,7 +296,7 @@ class TwoVehiclesEnv(gym.Env):
 
     def _compute_reward(self):
         x1, y1, θ1 , angular_diff = self.state
-        gx1, gy1 = self.goal_state
+        gx1, gy1,gθ1 = self.goal_state
         distance_to_goal = np.sqrt((gx1 - x1) ** 2 + (gy1 - y1) ** 2)
         if distance_to_goal <= self.epsilon2:
             return 250
@@ -309,67 +314,44 @@ class TwoVehiclesEnv(gym.Env):
 
 
 # ---- Main SAC Training Loop ---- #
-env = TwoVehiclesEnv(scenario=1)
-state_dim = env.observation_space.shape[0]
-action_dim = env.action_space.shape[0]
-action_scale = torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32).to(device)
-action_bias = torch.tensor((env.action_space.high + env.action_space.low) / 2.0, dtype=torch.float32).to(device)
-
-sac_agent = SAC(state_dim, action_dim, action_scale, action_bias)
-global_steps = 0
-
-def signal_handler(sig, frame):
-    print("\nInterrupt received! Cleaning up...")
-    plt.close('all')  # Close all open figures
-    sys.exit(0)  # Exit the program cleanly
-
-# Register the signal handler
-signal.signal(signal.SIGINT, signal_handler)
-episode_rewards = []
-
-plt.ion()  # Turn on interactive mode for dynamic updating
-fig_rewards, ax_rewards = plt.subplots()
-ax_rewards.set_xlabel("Episode")
-ax_rewards.set_ylabel("Total Reward")
-ax_rewards.set_title("Dynamic Plot of Total Reward per Episode")
-
-# Real-time agent movement visualization setup
-fig_agents, ax_agents = plt.subplots(figsize=(6, 6))
-ax_agents.set_xlim(0.1, 1)
-ax_agents.set_ylim(0.1, 1)
-ax_agents.set_title("Agent Simulation During Training")
-ax_agents.set_xlabel("X")
-ax_agents.set_ylabel("Y")
-
-
-for episode in range(2000):
+if __name__ == "__main__":
     env = TwoVehiclesEnv(scenario=1)
-    state , goal_state = env.reset()
-    episode_reward = 0
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.shape[0]
+    action_scale = torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32).to(device)
+    action_bias = torch.tensor((env.action_space.high + env.action_space.low) / 2.0, dtype=torch.float32).to(device)
 
-    ax_agents.clear()
+    sac_agent = SAC(state_dim, action_dim, action_scale, action_bias)
+    global_steps = 0
+
+    def signal_handler(sig, frame):
+        print("\nInterrupt received! Cleaning up...")
+        plt.close('all')  # Close all open figures
+        sys.exit(0)  # Exit the program cleanly
+
+    # Register the signal handler
+    signal.signal(signal.SIGINT, signal_handler)
+    episode_rewards = []
+
+    plt.ion()  # Turn on interactive mode for dynamic updating
+    fig_rewards, ax_rewards = plt.subplots()
+    ax_rewards.set_xlabel("Episode")
+    ax_rewards.set_ylabel("Total Reward")
+    ax_rewards.set_title("Dynamic Plot of Total Reward per Episode")
+
+    # Real-time agent movement visualization setup
+    fig_agents, ax_agents = plt.subplots(figsize=(6, 6))
     ax_agents.set_xlim(0.1, 1)
     ax_agents.set_ylim(0.1, 1)
-    ax_agents.set_title(f"Episode {episode + 1}: Agent Simulation")
+    ax_agents.set_title("Agent Simulation During Training")
     ax_agents.set_xlabel("X")
     ax_agents.set_ylabel("Y")
-    ax_agents.scatter(goal_state[0], goal_state[1], color='green', label="Goal 1", marker="X", s=100)
-    positions1 = [[state[0]], [state[1]]] 
-    print("------------------------------------------------------------------------------------------------------------")
-    print("epsiode" + str(episode))
-   
-    for t in range(200):
-        action = sac_agent.select_action(state)
-        next_state, reward, done, _ = env.step(action)
-        sac_agent.replay_buffer.add(state, action, reward, next_state, done)
-        state = next_state
 
-        episode_reward += reward
-        global_steps += 1
-        sac_agent.train(global_steps)
-        
-        positions1[0].append(next_state[0])
-        positions1[1].append(next_state[1])
+
+    for episode in range(2000):
+        env = TwoVehiclesEnv(scenario=1)
+        state , goal_state = env.reset()
+        episode_reward = 0
 
         ax_agents.clear()
         ax_agents.set_xlim(0.1, 1)
@@ -378,40 +360,64 @@ for episode in range(2000):
         ax_agents.set_xlabel("X")
         ax_agents.set_ylabel("Y")
         ax_agents.scatter(goal_state[0], goal_state[1], color='green', label="Goal 1", marker="X", s=100)
-        ax_agents.plot(positions1[0], positions1[1], color='red', label="Vehicle 1 Path")
-        ax_agents.scatter(next_state[0], next_state[1], color='red', label="Vehicle 1", s=50)
-        ax_agents.legend()
+        positions1 = [[state[0]], [state[1]]] 
+        print("------------------------------------------------------------------------------------------------------------")
+        print("epsiode" + str(episode))
+    
+        for t in range(200):
+            action = sac_agent.select_action(state)
+            next_state, reward, done, _ = env.step(action)
+            sac_agent.replay_buffer.add(state, action, reward, next_state, done)
+            state = next_state
 
+            episode_reward += reward
+            global_steps += 1
+            sac_agent.train(global_steps)
+            
+            positions1[0].append(next_state[0])
+            positions1[1].append(next_state[1])
+
+            ax_agents.clear()
+            ax_agents.set_xlim(0.1, 1)
+            ax_agents.set_ylim(0.1, 1)
+            ax_agents.set_title(f"Episode {episode + 1}: Agent Simulation")
+            ax_agents.set_xlabel("X")
+            ax_agents.set_ylabel("Y")
+            ax_agents.scatter(goal_state[0], goal_state[1], color='green', label="Goal 1", marker="X", s=100)
+            ax_agents.plot(positions1[0], positions1[1], color='red', label="Vehicle 1 Path")
+            ax_agents.scatter(next_state[0], next_state[1], color='red', label="Vehicle 1", s=50)
+            ax_agents.legend()
+
+            try:
+                plt.pause(0.01)  # Pause to refresh the plot dynamically
+            except KeyboardInterrupt:
+                signal_handler(None, None)
+            
+            
+            if done:
+                break
+
+        episode_rewards.append(episode_reward)
+        ax_rewards.clear()
+        ax_rewards.set_xlabel("Episode")
+        ax_rewards.set_ylabel("Total Reward")
+        ax_rewards.set_title("Dynamic Plot of Total Reward per Episode")
+        ax_rewards.plot(range(1, len(episode_rewards) + 1), episode_rewards, color="blue")
+        
         try:
             plt.pause(0.01)  # Pause to refresh the plot dynamically
         except KeyboardInterrupt:
             signal_handler(None, None)
+        print(f"Episode {episode + 1}: Reward = {episode_reward}")
         
-        
-        if done:
+        # Save checkpoint after every 20 episodes
+        if (episode + 1) % 2 == 0:
+            sac_agent.save_checkpoint("sac_checkpoint.pth")
+
+    plt.ioff()
+    while True:
+        user_input = input("Press 1 to close the figures: ")
+        if user_input == "1":
+            plt.close('all')
             break
-
-    episode_rewards.append(episode_reward)
-    ax_rewards.clear()
-    ax_rewards.set_xlabel("Episode")
-    ax_rewards.set_ylabel("Total Reward")
-    ax_rewards.set_title("Dynamic Plot of Total Reward per Episode")
-    ax_rewards.plot(range(1, len(episode_rewards) + 1), episode_rewards, color="blue")
-    
-    try:
-        plt.pause(0.01)  # Pause to refresh the plot dynamically
-    except KeyboardInterrupt:
-        signal_handler(None, None)
-    print(f"Episode {episode + 1}: Reward = {episode_reward}")
-    
-    # Save checkpoint after every 20 episodes
-    if (episode + 1) % 2 == 0:
-        sac_agent.save_checkpoint("sac_checkpoint.pth")
-
-plt.ioff()
-while True:
-    user_input = input("Press 1 to close the figures: ")
-    if user_input == "1":
-        plt.close('all')
-        break
 
