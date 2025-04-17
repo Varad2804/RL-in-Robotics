@@ -217,25 +217,45 @@ class MultiAgentEnv(gym.Env):
                                      dtype=np.float32)
         self.action_space = Box(low=np.array([-0.98]), high=np.array([0.98]), dtype=np.float32)
 
-        self.v = 0.05
+        self.v1 = 0.05
+        self.v2 = 0.05
         self.dt = 0.1
         self.epsilon = 0.04
-        self.alpha = 12
+        self.alpha = 6
         self.gamma = 0
+        self.done1=False
+        self.done2=False
         self.reset()
 
     def reset(self):
-        x1 = np.random.uniform(0.1, 0.5)
-        x2 = np.random.uniform(0.1, 0.5)
+        min_dist = 0.4  # minimum required distance between agents
+        self.v1=0.05
+        self.v2=0.05
+        self.done1=False
+        self.done2=False
+        # Keep sampling until the distance condition is satisfied
+        while True:
+            x1, y1 = np.random.uniform(0.1, 0.45), np.random.uniform(0.1, 0.9)
+            x2, y2 = np.random.uniform(0.1, 0.45), np.random.uniform(0.1, 0.9)  # Sample from different region
+            dist = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            if dist >= min_dist:
+                break
 
-        # y1=np.random.uniform(0.1,1)
-        # y2=np.random.uniform(0.1,1)
 
-        θ1 = np.random.uniform(0, 2*np.pi)
-        θ2 = np.random.uniform(0, 2*np.pi)
+        # θ1 = np.random.uniform(0, 2*np.pi)
+        # θ2 = np.random.uniform(0, 2*np.pi)
 
-        self.agent1_pos = np.array([x1, 1, θ1])
-        self.agent2_pos = np.array([x2, 0.1, θ2])
+        # self.agent1_pos = np.array([x1, y1, θ1])
+        # self.agent2_pos = np.array([x2, y2, θ2])
+
+        # self.agent1_goal = np.copy(self.agent2_pos)
+        # self.agent2_goal = np.copy(self.agent1_pos)
+        # Compute angle from agent1 to agent2 and vice versa
+        angle1_to_2 = np.arctan2(y2 - y1, x2 - x1)
+        angle2_to_1 = np.arctan2(y1 - y2, x1 - x2)
+
+        self.agent1_pos = np.array([x1, y1, angle1_to_2])
+        self.agent2_pos = np.array([x2, y2, angle2_to_1])
 
         self.agent1_goal = np.copy(self.agent2_pos)
         self.agent2_goal = np.copy(self.agent1_pos)
@@ -257,41 +277,58 @@ class MultiAgentEnv(gym.Env):
 
     def collision(self, a_pos, b_pos):
         for step in range(5):
-            future_a = a_pos[:2] + self.v * np.array([np.cos(a_pos[2]), np.sin(a_pos[2])]) * step * self.dt
-            future_b = b_pos[:2] + self.v * np.array([np.cos(b_pos[2]), np.sin(b_pos[2])]) * step * self.dt
+            future_a = a_pos[:2] + self.v1 * np.array([np.cos(a_pos[2]), np.sin(a_pos[2])]) * step * self.dt
+            future_b = b_pos[:2] + self.v2 * np.array([np.cos(b_pos[2]), np.sin(b_pos[2])]) * step * self.dt
             if np.linalg.norm(future_a - future_b) < 0.05:
                 return True
         return False
 
-    def _compute_reward(self, pos, goal, other_pos, angular_diff):
+    def _compute_reward(self, pos, goal, other_pos, angular_diff,done):
         dist = np.linalg.norm(pos[:2] - goal[:2])
         distbtwagents=np.linalg.norm(pos[:2]-other_pos[:2])
-        if dist <= self.epsilon:
-            return 150, True
+        if dist <= self.epsilon and not done:
+            return 250, True
         if pos[0] < 0 or pos[0] > 0.5 or pos[1] < 0 or pos[1] > 1.0:
             return -20, True
         reward = -self.alpha * abs(angular_diff) / np.pi
         if self.collision(pos, other_pos) and distbtwagents<0.05:
-            reward -= 50
+            reward -= 100
         reward+=-1 #penalising for every time step taken so that we minimise the time steps to reach the goal..
         return reward, False
 
     def step(self, action1, action2):
-        def move(pos, action):
-            dx = self.v * np.cos(pos[2]) * self.dt
-            dy = self.v * np.sin(pos[2]) * self.dt
-            pos[0] = np.clip(pos[0] + dx, 0.1, 0.5)
-            pos[1] = np.clip(pos[1] + dy, 0.1, 1.0)
-            pos[2] = (pos[2] + float(action) * self.dt) % (2*np.pi)
-            return pos
+        def move(pos, action,agent):
+            if agent:
+                dx = self.v1 * np.cos(pos[2]) * self.dt
+                dy = self.v1 * np.sin(pos[2]) * self.dt
+                pos[0] = np.clip(pos[0] + dx, 0.1, 0.5)
+                pos[1] = np.clip(pos[1] + dy, 0.1, 1.0)
+                pos[2] = (pos[2] + float(action) * self.dt) % (2*np.pi)
+                return pos
+            else:
+                dx = self.v2 * np.cos(pos[2]) * self.dt
+                dy = self.v2 * np.sin(pos[2]) * self.dt
+                pos[0] = np.clip(pos[0] + dx, 0.1, 0.5)
+                pos[1] = np.clip(pos[1] + dy, 0.1, 1.0)
+                pos[2] = (pos[2] + float(action) * self.dt) % (2*np.pi)
+                return pos
+                
 
-        self.agent1_pos = move(self.agent1_pos, action1)
-        self.agent2_pos = move(self.agent2_pos, action2)
+        self.agent1_pos = move(self.agent1_pos, action1,True)
+        self.agent2_pos = move(self.agent2_pos, action2,False)
 
         self._update_states()
 
-        r1, d1 = self._compute_reward(self.agent1_pos, self.agent1_goal, self.agent2_pos, self.agent1_state[3])
-        r2, d2 = self._compute_reward(self.agent2_pos, self.agent2_goal, self.agent1_pos, self.agent2_state[3])
+        r1, d1 = self._compute_reward(self.agent1_pos, self.agent1_goal, self.agent2_pos, self.agent1_state[3],self.done1)
+        r2, d2 = self._compute_reward(self.agent2_pos, self.agent2_goal, self.agent1_pos, self.agent2_state[3],self.done2)
+
+        if d1:
+            self.v1=0
+            self.done1=True
+    
+        if d2:
+            self.v2=0
+            self.done2=True
 
         return (self.agent1_state, self.agent2_state), (r1, r2), (d1, d2)
 
@@ -318,20 +355,20 @@ if __name__ == "__main__":
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    plt.ion()
-    fig_rewards, ax_rewards = plt.subplots()
-    ax_rewards.set_xlabel("Episode")
-    ax_rewards.set_ylabel("Total Reward")
-    ax_rewards.set_title("Reward per Episode for Both Agents")
+    # plt.ion()
+    # fig_rewards, ax_rewards = plt.subplots()
+    # ax_rewards.set_xlabel("Episode")
+    # ax_rewards.set_ylabel("Total Reward")
+    # ax_rewards.set_title("Reward per Episode for Both Agents")
 
-    fig_agents, ax_agents = plt.subplots(figsize=(6, 6))
-    ax_agents.set_xlim(0, 0.5)
-    ax_agents.set_ylim(0, 1.0)
-    ax_agents.set_title("Agent Positions")
-    ax_agents.set_xlabel("X")
-    ax_agents.set_ylabel("Y")
+    # fig_agents, ax_agents = plt.subplots(figsize=(6, 6))
+    # ax_agents.set_xlim(0, 0.5)
+    # ax_agents.set_ylim(0, 1.0)
+    # ax_agents.set_title("Agent Positions")
+    # ax_agents.set_xlabel("X")
+    # ax_agents.set_ylabel("Y")
 
-    for episode in range(5001):
+    for episode in range(1600):
         state1, state2 = env.reset()
         episode_reward1 = 0
         episode_reward2 = 0
@@ -366,38 +403,38 @@ if __name__ == "__main__":
             pos2_x.append(state2[0])
             pos2_y.append(state2[1])
 
-            ax_agents.clear()
-            ax_agents.set_xlim(0, 0.5)
-            ax_agents.set_ylim(0, 1.0)
-            ax_agents.set_title(f"Episode {episode + 1}: Agent Simulation")
-            ax_agents.set_xlabel("X")
-            ax_agents.set_ylabel("Y")
-            ax_agents.plot(pos1_x, pos1_y, color="red", label="Agent 1 Path")
-            ax_agents.plot(pos2_x, pos2_y, color="blue", label="Agent 2 Path")
-            ax_agents.scatter(env.agent1_goal[0], env.agent1_goal[1], color="red", marker="x", label="Agent 1 Goal")
-            ax_agents.scatter(env.agent2_goal[0], env.agent2_goal[1], color="blue", marker="x", label="Agent 2 Goal")
-            ax_agents.scatter(state1[0], state1[1], color="red", s=50)
-            ax_agents.scatter(state2[0], state2[1], color="blue", s=50)
-            ax_agents.legend()
+            # ax_agents.clear()
+            # ax_agents.set_xlim(0, 0.5)
+            # ax_agents.set_ylim(0, 1.0)
+            # ax_agents.set_title(f"Episode {episode + 1}: Agent Simulation")
+            # ax_agents.set_xlabel("X")
+            # ax_agents.set_ylabel("Y")
+            # ax_agents.plot(pos1_x, pos1_y, color="red", label="Agent 1 Path")
+            # ax_agents.plot(pos2_x, pos2_y, color="blue", label="Agent 2 Path")
+            # ax_agents.scatter(env.agent1_goal[0], env.agent1_goal[1], color="red", marker="x", label="Agent 1 Goal")
+            # ax_agents.scatter(env.agent2_goal[0], env.agent2_goal[1], color="blue", marker="x", label="Agent 2 Goal")
+            # ax_agents.scatter(state1[0], state1[1], color="red", s=50)
+            # ax_agents.scatter(state2[0], state2[1], color="blue", s=50)
+            # ax_agents.legend()
 
             try:
                 plt.pause(0.01)
             except KeyboardInterrupt:
                 signal_handler(None, None)
 
-            if done1 or done2:
+            if done1 and done2:
                 break
 
         episode_rewards_1.append(episode_reward1)
         episode_rewards_2.append(episode_reward2)
 
-        ax_rewards.clear()
-        ax_rewards.set_title("Reward per Episode for Both Agents")
-        ax_rewards.set_xlabel("Episode")
-        ax_rewards.set_ylabel("Reward")
-        ax_rewards.plot(episode_rewards_1, label="Agent 1")
-        ax_rewards.plot(episode_rewards_2, label="Agent 2")
-        ax_rewards.legend()
+        # ax_rewards.clear()
+        # ax_rewards.set_title("Reward per Episode for Both Agents")
+        # ax_rewards.set_xlabel("Episode")
+        # ax_rewards.set_ylabel("Reward")
+        # ax_rewards.plot(episode_rewards_1, label="Agent 1")
+        # ax_rewards.plot(episode_rewards_2, label="Agent 2")
+        # ax_rewards.legend()
 
         try:
             plt.pause(0.01)
@@ -409,7 +446,7 @@ if __name__ == "__main__":
             agent1.save_checkpoint("agent1_checkpoint.pth", global_steps)
             agent2.save_checkpoint("agent2_checkpoint.pth", global_steps)
 
-    plt.ioff()
+    # plt.ioff()
     while True:
         user_input = input("Press 1 to close the figures: ")
         if user_input == "1":
