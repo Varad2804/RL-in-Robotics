@@ -1,3 +1,5 @@
+# Dual-Agent SAC in Rectangular Grid Environment
+
 import numpy as np
 import gymnasium as gym
 from gymnasium.spaces import Box
@@ -13,11 +15,10 @@ import matplotlib.pyplot as plt
 from collections import deque
 import os
 
-# Set random seed and device
 torch.backends.cudnn.deterministic = True
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ---------------- Replay Buffer ---------------- #
+# Replay Buffer
 class ReplayBuffer:
     def __init__(self, buffer_size=int(8000)):
         self.buffer = deque(maxlen=buffer_size)
@@ -28,16 +29,15 @@ class ReplayBuffer:
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
-        return (np.array(states),
-                np.array(actions),
-                np.array(rewards),
-                np.array(next_states),
-                np.array(dones))
+        return (
+            np.array(states),
+            np.array(actions),
+            np.array(rewards),
+            np.array(next_states),
+            np.array(dones),
+        )
 
-# ---------------- Network Definitions ---------------- #
-LOG_STD_MAX = 2
-LOG_STD_MIN = -5
-
+# Q-Network
 class SoftQNetwork(nn.Module):
     def __init__(self, state_dim, action_dim):
         super().__init__()
@@ -50,6 +50,10 @@ class SoftQNetwork(nn.Module):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         return self.fc3(x)
+
+# Actor
+LOG_STD_MAX = 2
+LOG_STD_MIN = -5
 
 class SACActor(nn.Module):
     def __init__(self, state_dim, action_dim, action_scale, action_bias):
@@ -80,16 +84,15 @@ class SACActor(nn.Module):
         log_prob = log_prob.sum(1, keepdim=True)
         return action, log_prob
 
-# ---------------- SAC Agent Definition ---------------- #
+# SAC Agent
 class SAC:
-    def __init__(self, state_dim, action_dim, action_scale, action_bias, checkpoint_file=None):
+    def __init__(self, state_dim, action_dim, action_scale, action_bias , filename):
         self.actor = SACActor(state_dim, action_dim, action_scale, action_bias).to(device).float()
         self.qf1 = SoftQNetwork(state_dim, action_dim).to(device).float()
         self.qf2 = SoftQNetwork(state_dim, action_dim).to(device).float()
         self.qf1_target = SoftQNetwork(state_dim, action_dim).to(device).float()
         self.qf2_target = SoftQNetwork(state_dim, action_dim).to(device).float()
 
-        # Initialize target networks with same weights
         self.qf1_target.load_state_dict(self.qf1.state_dict())
         self.qf2_target.load_state_dict(self.qf2.state_dict())
 
@@ -97,7 +100,6 @@ class SAC:
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=3e-4)
         self.replay_buffer = ReplayBuffer()
 
-        # Automatic entropy tuning
         self.target_entropy = -action_dim
         self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
         self.alpha = self.log_alpha.exp().item()
@@ -106,18 +108,52 @@ class SAC:
         self.gamma = 0.99
         self.tau = 0.005
         self.policy_freq = 2
+        self.load_checkpoint(filename)
+        self.alpha = self.log_alpha.exp().item()
 
-        if checkpoint_file:
-            self.load_checkpoint(checkpoint_file)
-            self.alpha = self.log_alpha.exp().item()
+
+    def save_checkpoint(self, filename, global_steps):
+        checkpoint = {
+            'actor_state_dict': self.actor.state_dict(),
+            'qf1_state_dict': self.qf1.state_dict(),
+            'qf2_state_dict': self.qf2.state_dict(),
+            'qf1_target_state_dict': self.qf1_target.state_dict(),
+            'qf2_target_state_dict': self.qf2_target.state_dict(),
+            'actor_optimizer_state_dict': self.actor_optimizer.state_dict(),
+            'q_optimizer_state_dict': self.q_optimizer.state_dict(),
+            'a_optimizer_state_dict': self.a_optimizer.state_dict(),
+            'log_alpha': self.log_alpha,
+            'global_steps': global_steps,
+        }
+        torch.save(checkpoint, filename)
+        print(f"Checkpoint saved to {filename}")
+
+    def load_checkpoint(self, filename):
+        if os.path.exists(filename):
+            checkpoint = torch.load(filename, map_location=device)
+            self.actor.load_state_dict(checkpoint['actor_state_dict'])
+            self.qf1.load_state_dict(checkpoint['qf1_state_dict'])
+            self.qf2.load_state_dict(checkpoint['qf2_state_dict'])
+            self.qf1_target.load_state_dict(checkpoint['qf1_target_state_dict'])
+            self.qf2_target.load_state_dict(checkpoint['qf2_target_state_dict'])
+
+            self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])
+            self.q_optimizer.load_state_dict(checkpoint['q_optimizer_state_dict'])
+            self.a_optimizer.load_state_dict(checkpoint['a_optimizer_state_dict'])
+            self.log_alpha = checkpoint['log_alpha']
+            print(f"Checkpoint loaded from {filename}")
+        else:
+            print(f"No checkpoint found at {filename}, starting from scratch.")
 
     def select_action(self, state):
-        with torch.no_grad():
+        # print(f"alpha values : {self.alpha}")
+        with torch.no_grad():  # No need to track gradients during inference
             state = torch.FloatTensor(state.reshape(1, -1)).to(device)
             action, _ = self.actor.get_action(state)
         return action.detach().cpu().numpy().flatten()
 
     def soft_update(self):
+        # Soft update target networks using the τ coefficient
         for param, target_param in zip(self.qf1.parameters(), self.qf1_target.parameters()):
             target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
         for param, target_param in zip(self.qf2.parameters(), self.qf2_target.parameters()):
@@ -128,11 +164,13 @@ class SAC:
             return
 
         states, actions, rewards, next_states, dones = self.replay_buffer.sample(batch_size)
-        states = torch.FloatTensor(states).to(device)
-        actions = torch.FloatTensor(actions).to(device)
-        rewards = torch.FloatTensor(rewards).reshape(-1, 1).to(device)
-        next_states = torch.FloatTensor(next_states).to(device)
-        dones = torch.FloatTensor(dones).reshape(-1, 1).to(device)
+        states, actions, rewards, next_states, dones = (
+            torch.FloatTensor(states).to(device),
+            torch.FloatTensor(actions).to(device),
+            torch.FloatTensor(rewards).reshape(-1, 1).to(device),
+            torch.FloatTensor(next_states).to(device),
+            torch.FloatTensor(dones).reshape(-1, 1).to(device),
+        )
 
         with torch.no_grad():
             next_actions, next_log_pi = self.actor.get_action(next_states)
@@ -150,316 +188,265 @@ class SAC:
         self.q_optimizer.step()
 
         if global_steps % self.policy_freq == 0:
-            for _ in range(self.policy_freq):
-                actions_pi, log_pi = self.actor.get_action(states)
-                q1_pi = self.qf1(states, actions_pi)
-                q2_pi = self.qf2(states, actions_pi)
-                min_q_pi = torch.min(q1_pi, q2_pi)
-                actor_loss = (self.alpha * log_pi - min_q_pi).mean()
+            actions, log_pi = self.actor.get_action(states)
+            q1_pi = self.qf1(states, actions)
+            q2_pi = self.qf2(states, actions)
+            min_q_pi = torch.min(q1_pi, q2_pi)
+            actor_loss = (self.alpha * log_pi - min_q_pi).mean()
 
-                self.actor_optimizer.zero_grad()
-                actor_loss.backward()
-                self.actor_optimizer.step()
+            self.actor_optimizer.zero_grad()
+            actor_loss.backward()
+            self.actor_optimizer.step()
 
-                with torch.no_grad():
-                    _, log_pi = self.actor.get_action(states)
-                alpha_loss = -(self.log_alpha.exp() * (log_pi + self.target_entropy).detach()).mean()
+            actions, log_pi = self.actor.get_action(states)
+            alpha_loss = -(self.log_alpha.exp() * (log_pi + self.target_entropy).detach()).mean()
 
-                self.a_optimizer.zero_grad()
-                alpha_loss.backward()
-                self.a_optimizer.step()
-                self.alpha = self.log_alpha.exp().item()
-            self.soft_update()
+            self.a_optimizer.zero_grad()
+            alpha_loss.backward()
+            self.a_optimizer.step()
+            self.alpha = self.log_alpha.exp().item()
 
-    def save_checkpoint(self, filename, global_steps):
-        checkpoint = {
-            'actor_state_dict': self.actor.state_dict(),
-            'qf1_state_dict': self.qf1.state_dict(),
-            'qf2_state_dict': self.qf2.state_dict(),
-            'qf1_target_state_dict': self.qf1_target.state_dict(),
-            'qf2_target_state_dict': self.qf2_target.state_dict(),
-            'actor_optimizer_state_dict': self.actor_optimizer.state_dict(),
-            'q_optimizer_state_dict': self.q_optimizer.state_dict(),
-            'a_optimizer_state_dict': self.a_optimizer.state_dict(),
-            'log_alpha': self.log_alpha,
-            'global_steps': global_steps,
-        }
-        torch.save(checkpoint, filename)
-        print("Checkpoint saved.")
+        self.soft_update()
 
-    def load_checkpoint(self, filename):
-        if os.path.exists(filename):
-            checkpoint = torch.load(filename, map_location=device)
-            self.actor.load_state_dict(checkpoint['actor_state_dict'])
-            self.qf1.load_state_dict(checkpoint['qf1_state_dict'])
-            self.qf2.load_state_dict(checkpoint['qf2_state_dict'])
-            self.qf1_target.load_state_dict(checkpoint['qf1_target_state_dict'])
-            self.qf2_target.load_state_dict(checkpoint['qf2_target_state_dict'])
-            self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])
-            self.q_optimizer.load_state_dict(checkpoint['q_optimizer_state_dict'])
-            self.a_optimizer.load_state_dict(checkpoint['a_optimizer_state_dict'])
-            self.log_alpha = checkpoint['log_alpha']
-            global_steps = checkpoint['global_steps']
-            print("Checkpoint loaded.")
-        else:
-            print("No checkpoint found. Starting training from scratch.")
-
-def check_out_of_bounds(x, y):
-        if x <= 0.1 or x >= 0.5 or y <= 0.1 or y >= 1.0:
-            return -20  # Heavy Penalty for going out of bounds
-        return 0
-# ---------------- Modified Two-Agents Environment with Collision Triangle ---------------- #
-class TwoVehiclesEnv(gym.Env):
-    """
-    In this environment, there are two agents.
-    - Agent 1’s goal is to approach Agent 2.
-    - Agent 2’s goal is to approach Agent 1.
-    Each agent’s observation is a 4D vector:
-        [x, y, theta, angular_diff]
-    where angular_diff is the difference between the agent’s heading and the angle toward the other agent.
-    
-    A collision triangle is checked by predicting future positions. If a collision triangle is detected,
-    an extra negative reward is applied.
-    """
+# MultiAgent Environment
+class MultiAgentEnv(gym.Env):
     def __init__(self):
-        super(TwoVehiclesEnv, self).__init__()
-        low = np.array([0.1, 0.1, 0.0, -np.pi], dtype=np.float32)
-        high = np.array([0.5, 1.0, 2*np.pi, np.pi], dtype=np.float32)
-        self.observation_space = Box(low=low, high=high, dtype=np.float32)
+        super(MultiAgentEnv, self).__init__()
+        self.observation_space = Box(low=np.array([0, 0, 0, -np.pi, -np.pi]),
+                                     high=np.array([0.5, 1.0, 2*np.pi, np.pi, np.pi]),
+                                     dtype=np.float32)
         self.action_space = Box(low=np.array([-0.98]), high=np.array([0.98]), dtype=np.float32)
 
+        self.v1 = 0.05
+        self.v2 = 0.05
         self.dt = 0.1
-        self.v1 = 0.05  # Velocity for agent1
-        self.v2 = 0.05  # Velocity for agent2
-        self.alpha = 10
-        self.epsilon = 0.04      # Success threshold (agents are considered to have reached each other)
-        self.collision_penalty = 50  # Penalty applied if a collision triangle is detected
+        self.epsilon = 0.04
+        self.alpha = 6
+        self.gamma = 0
+        self.done1=False
+        self.done2=False
+        self.reset()
 
     def reset(self):
-        # Sample initial states ensuring agents are not too close initially
+        min_dist = 0.4  # minimum required distance between agents
+        self.v1=0.05
+        self.v2=0.05
+        self.done1=False
+        self.done2=False
+        # Keep sampling until the distance condition is satisfied
         while True:
-            self.agent1_state = np.array([
-                np.random.uniform(0.1, 0.45),
-                np.random.uniform(0.1, 1.0),
-                np.random.uniform(0, 2 * np.pi)
-            ], dtype=np.float32)
-            self.agent2_state = np.array([
-                np.random.uniform(0.1, 0.45),
-                np.random.uniform(0.1, 1.0),
-                np.random.uniform(0, 2 * np.pi)
-            ], dtype=np.float32)
-            if np.linalg.norm(self.agent1_state[:2] - self.agent2_state[:2]) > 0.3:
+            x1, y1 = np.random.uniform(0.1, 0.45), np.random.uniform(0.1, 0.9)
+            x2, y2 = np.random.uniform(0.1, 0.45), np.random.uniform(0.1, 0.9)  # Sample from different region
+            dist = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            if dist >= min_dist:
                 break
 
-        obs1 = self._get_obs(agent=1)
-        obs2 = self._get_obs(agent=2)
-        return obs1, obs2
 
-    def _get_obs(self, agent=1):
-        if agent == 1:
-            x, y, theta = self.agent1_state
-            goal_x, goal_y = self.agent2_state[:2]
-        else:
-            x, y, theta = self.agent2_state
-            goal_x, goal_y = self.agent1_state[:2]
+        # θ1 = np.random.uniform(0, 2*np.pi)
+        # θ2 = np.random.uniform(0, 2*np.pi)
 
-        desired_heading = math.atan2(goal_y - y, goal_x - x)
-        angular_diff = ((desired_heading - theta + np.pi) % (2 * np.pi)) - np.pi
-        return np.array([x, y, theta, angular_diff], dtype=np.float32)
+        # self.agent1_pos = np.array([x1, y1, θ1])
+        # self.agent2_pos = np.array([x2, y2, θ2])
 
-    def collision_triangle(self, horizon=2.0, collision_threshold=0.05):
-        """
-        Predict future positions for both agents over the given horizon.
-        If at any predicted step the distance between agents is less than collision_threshold,
-        return True to indicate a collision triangle.
-        """
-        steps = int(horizon / self.dt)
-        # Use at least 5 steps for prediction
-        steps = max(steps, 5)
-        x1, y1, theta1 = self.agent1_state
-        x2, y2, theta2 = self.agent2_state
+        # self.agent1_goal = np.copy(self.agent2_pos)
+        # self.agent2_goal = np.copy(self.agent1_pos)
+        # Compute angle from agent1 to agent2 and vice versa
+        angle1_to_2 = np.arctan2(y2 - y1, x2 - x1)
+        angle2_to_1 = np.arctan2(y1 - y2, x1 - x2)
 
-        for step in range(1, steps + 1):
-            future_x1 = x1 + self.v1 * math.cos(theta1) * step * self.dt
-            future_y1 = y1 + self.v1 * math.sin(theta1) * step * self.dt
-            future_x2 = x2 + self.v2 * math.cos(theta2) * step * self.dt
-            future_y2 = y2 + self.v2 * math.sin(theta2) * step * self.dt
-            distance = math.sqrt((future_x1 - future_x2)**2 + (future_y1 - future_y2)**2)
-            if distance < collision_threshold:
+        self.agent1_pos = np.array([x1, y1, angle1_to_2])
+        self.agent2_pos = np.array([x2, y2, angle2_to_1])
+
+        self.agent1_goal = np.copy(self.agent2_pos)
+        self.agent2_goal = np.copy(self.agent1_pos)
+
+        self._update_states()
+        return self.agent1_state, self.agent2_state
+
+    def _update_states(self):
+        def get_state(agent_pos, goal, other_pos):
+            θ_goal = math.atan2(goal[1] - agent_pos[1], goal[0] - agent_pos[0])
+            θ_other = math.atan2(other_pos[1] - agent_pos[1], other_pos[0] - agent_pos[0])
+            θ = agent_pos[2]
+            angular_diff = ((θ_goal - θ + np.pi) % (2*np.pi)) - np.pi
+            angular_diff2 = ((θ_other - θ + np.pi) % (2*np.pi)) - np.pi
+            return np.array([agent_pos[0], agent_pos[1], θ, angular_diff, angular_diff2])
+
+        self.agent1_state = get_state(self.agent1_pos, self.agent1_goal, self.agent2_pos)
+        self.agent2_state = get_state(self.agent2_pos, self.agent2_goal, self.agent1_pos)
+
+    def collision(self, a_pos, b_pos):
+        for step in range(5):
+            future_a = a_pos[:2] + self.v1 * np.array([np.cos(a_pos[2]), np.sin(a_pos[2])]) * step * self.dt
+            future_b = b_pos[:2] + self.v2 * np.array([np.cos(b_pos[2]), np.sin(b_pos[2])]) * step * self.dt
+            if np.linalg.norm(future_a - future_b) < 0.05:
                 return True
         return False
+
+    def _compute_reward(self, pos, goal, other_pos, angular_diff,done):
+        dist = np.linalg.norm(pos[:2] - goal[:2])
+        distbtwagents=np.linalg.norm(pos[:2]-other_pos[:2])
+        if dist <= self.epsilon and not done:
+            return 250, True
+        if pos[0] < 0 or pos[0] > 0.5 or pos[1] < 0 or pos[1] > 1.0:
+            return -20, True
+        reward = -self.alpha * abs(angular_diff) / np.pi
+        if self.collision(pos, other_pos) and distbtwagents<0.05:
+            reward -= 100
+        reward+=-1 #penalising for every time step taken so that we minimise the time steps to reach the goal..
+        return reward, False
+
+    def step(self, action1, action2):
+        def move(pos, action,agent):
+            if agent:
+                dx = self.v1 * np.cos(pos[2]) * self.dt
+                dy = self.v1 * np.sin(pos[2]) * self.dt
+                pos[0] = np.clip(pos[0] + dx, 0.1, 0.5)
+                pos[1] = np.clip(pos[1] + dy, 0.1, 1.0)
+                pos[2] = (pos[2] + float(action) * self.dt) % (2*np.pi)
+                return pos
+            else:
+                dx = self.v2 * np.cos(pos[2]) * self.dt
+                dy = self.v2 * np.sin(pos[2]) * self.dt
+                pos[0] = np.clip(pos[0] + dx, 0.1, 0.5)
+                pos[1] = np.clip(pos[1] + dy, 0.1, 1.0)
+                pos[2] = (pos[2] + float(action) * self.dt) % (2*np.pi)
+                return pos
+                
+
+        self.agent1_pos = move(self.agent1_pos, action1,True)
+        self.agent2_pos = move(self.agent2_pos, action2,False)
+
+        self._update_states()
+
+        r1, d1 = self._compute_reward(self.agent1_pos, self.agent1_goal, self.agent2_pos, self.agent1_state[3],self.done1)
+        r2, d2 = self._compute_reward(self.agent2_pos, self.agent2_goal, self.agent1_pos, self.agent2_state[3],self.done2)
+
+        if d1:
+            self.v1=0
+            self.done1=True
     
-    def step(self, actions):
-        """
-        actions: tuple of two actions (action1 for agent1, action2 for agent2)
-        """
-        action1, action2 = actions
+        if d2:
+            self.v2=0
+            self.done2=True
 
-        # Update headings based on actions (steering)
-        self.agent1_state[2] = (self.agent1_state[2] + float(action1) * self.dt) % (2 * np.pi)
-        self.agent2_state[2] = (self.agent2_state[2] + float(action2) * self.dt) % (2 * np.pi)
+        return (self.agent1_state, self.agent2_state), (r1, r2), (d1, d2)
 
-        # Update positions using constant velocities
-        for state, v in zip([self.agent1_state, self.agent2_state], [self.v1, self.v2]):
-            delta_x = v * math.cos(state[2]) * self.dt
-            delta_y = v * math.sin(state[2]) * self.dt
-            state[0] = np.clip(state[0] + delta_x, 0.1, 0.5)
-            state[1] = np.clip(state[1] + delta_y, 0.1, 1.0)
-
-        # Compute observations for both agents
-        obs1 = self._get_obs(agent=1)
-        obs2 = self._get_obs(agent=2)
-
-        # Compute Euclidean distance between the agents
-        pos1 = self.agent1_state[:2]
-        pos2 = self.agent2_state[:2]
-        distance = np.linalg.norm(pos1 - pos2)
-
-        x1, y1 = self.agent1_state[0], self.agent1_state[1]
-        penalty1 = check_out_of_bounds(x1, y1)
-        
-        x2, y2 = self.agent2_state[0], self.agent2_state[1]
-        penalty2=check_out_of_bounds(x2,y2)
-        # Base reward: if within success threshold, give high positive reward;
-        # otherwise penalize based on angular error.
-        reward1 = 150 if distance <= self.epsilon else - self.alpha * (abs(obs1[3]) / np.pi)
-        reward2 = 150 if distance <= self.epsilon else - self.alpha * (abs(obs2[3]) / np.pi)
-
-        # Check for collision triangle. If detected, subtract collision penalty.
-        done = False
-        if self.collision_triangle():
-            reward1 -= self.collision_penalty
-            reward2 -= self.collision_penalty
-            done = True  # End the episode if a collision triangle is formed
-
-        # End episode if agents have reached each other
-        if distance <= self.epsilon:
-            done = True
-        reward1+=penalty1
-        reward2+=penalty2
-        return (obs1, reward1, done), (obs2, reward2, done)
-
-# ---------------- Main Training Loop ---------------- #
+# --- Training Loop ---
 if __name__ == "__main__":
-    env = TwoVehiclesEnv()
+    env = MultiAgentEnv()
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
-    action_scale = torch.tensor((env.action_space.high - env.action_space.low) / 2.0,
-                                dtype=torch.float32).to(device)
-    action_bias = torch.tensor((env.action_space.high + env.action_space.low) / 2.0,
-                               dtype=torch.float32).to(device)
 
-    # Two independent SAC agents
-    sac_agent1 = SAC(state_dim, action_dim, action_scale, action_bias,"sac_agent1_checkpoint.pth")
-    sac_agent2 = SAC(state_dim, action_dim, action_scale, action_bias,"sac_agent2_checkpoint.pth")
+    action_scale = torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32).to(device)
+    action_bias = torch.tensor((env.action_space.high + env.action_space.low) / 2.0, dtype=torch.float32).to(device)
+
+    agent1 = SAC(state_dim, action_dim, action_scale, action_bias , "agent1_checkpoint.pth")
+    agent2 = SAC(state_dim, action_dim, action_scale, action_bias , "agent2_checkpoint.pth")
+
     global_steps = 0
+    episode_rewards_1 = []
+    episode_rewards_2 = []
 
     def signal_handler(sig, frame):
-        print("\nInterrupt received! Cleaning up...")
+        print("Interrupt received! Cleaning up...")
         plt.close('all')
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    episode_rewards_agent1 = []
-    episode_rewards_agent2 = []
+    # plt.ion()
+    # fig_rewards, ax_rewards = plt.subplots()
+    # ax_rewards.set_xlabel("Episode")
+    # ax_rewards.set_ylabel("Total Reward")
+    # ax_rewards.set_title("Reward per Episode for Both Agents")
 
-    plt.ion()
-    fig_rewards, ax_rewards = plt.subplots()
-    ax_rewards.set_xlabel("Episode")
-    ax_rewards.set_ylabel("Total Reward")
-    ax_rewards.set_title("Total Rewards per Episode (Agent1 & Agent2)")
+    # fig_agents, ax_agents = plt.subplots(figsize=(6, 6))
+    # ax_agents.set_xlim(0, 0.5)
+    # ax_agents.set_ylim(0, 1.0)
+    # ax_agents.set_title("Agent Positions")
+    # ax_agents.set_xlabel("X")
+    # ax_agents.set_ylabel("Y")
 
-    fig_agents, ax_agents = plt.subplots(figsize=(6, 6))
-    ax_agents.set_xlim(0.1, 0.5)
-    ax_agents.set_ylim(0.1, 1)
-    ax_agents.set_title("Agent Simulation During Training")
-    ax_agents.set_xlabel("X")
-    ax_agents.set_ylabel("Y")
-
-    num_episodes = 2000
-    for episode in range(num_episodes):
-        obs1, obs2 = env.reset()
+    for episode in range(1600):
+        state1, state2 = env.reset()
         episode_reward1 = 0
         episode_reward2 = 0
 
-        positions1 = [[obs1[0]], [obs1[1]]]
-        positions2 = [[obs2[0]], [obs2[1]]]
+        pos1_x = [state1[0]]
+        pos1_y = [state1[1]]
+        pos2_x = [state2[0]]
+        pos2_y = [state2[1]]
 
-        ax_agents.clear()
-        ax_agents.set_xlim(0.1, 0.5)
-        ax_agents.set_ylim(0.1, 1)
-        ax_agents.set_title(f"Episode {episode + 1}: Agent Simulation")
-        ax_agents.set_xlabel("X")
-        ax_agents.set_ylabel("Y")
-
-        print("---------------------------------------------------------")
-        print("Episode", episode + 1)
+        print("-" * 120)
+        print(f"Episode {episode + 1}")
 
         for t in range(200):
-            action1 = sac_agent1.select_action(obs1)
-            action2 = sac_agent2.select_action(obs2)
+            action1 = agent1.select_action(state1)
+            action2 = agent2.select_action(state2)
 
-            (next_obs1, reward1, done), (next_obs2, reward2, _) = env.step((action1, action2))
-            sac_agent1.replay_buffer.add(obs1, action1, reward1, next_obs1, done)
-            sac_agent2.replay_buffer.add(obs2, action2, reward2, next_obs2, done)
+            (next_state1, next_state2), (reward1, reward2), (done1, done2) = env.step(action1, action2)
 
-            obs1 = next_obs1
-            obs2 = next_obs2
+            agent1.replay_buffer.add(state1, action1, reward1, next_state1, done1)
+            agent2.replay_buffer.add(state2, action2, reward2, next_state2, done2)
 
+            state1, state2 = next_state1, next_state2
             episode_reward1 += reward1
             episode_reward2 += reward2
             global_steps += 1
 
-            sac_agent1.train(global_steps)
-            sac_agent2.train(global_steps)
+            agent1.train(global_steps)
+            agent2.train(global_steps)
 
-            positions1[0].append(obs1[0])
-            positions1[1].append(obs1[1])
-            positions2[0].append(obs2[0])
-            positions2[1].append(obs2[1])
+            pos1_x.append(state1[0])
+            pos1_y.append(state1[1])
+            pos2_x.append(state2[0])
+            pos2_y.append(state2[1])
 
-            # Update dynamic plot of agents
-            ax_agents.clear()
-            ax_agents.set_xlim(0.1, 0.5)
-            ax_agents.set_ylim(0.1, 1)
-            ax_agents.set_title(f"Episode {episode + 1}: Agent Simulation")
-            ax_agents.set_xlabel("X")
-            ax_agents.set_ylabel("Y")
-            ax_agents.plot(positions1[0], positions1[1], color='red', label="Agent 1 Path")
-            ax_agents.plot(positions2[0], positions2[1], color='blue', label="Agent 2 Path")
-            ax_agents.scatter(positions1[0][-1], positions1[1][-1], color='red', s=50)
-            ax_agents.scatter(positions2[0][-1], positions2[1][-1], color='blue', s=50)
-            ax_agents.legend()
+            # ax_agents.clear()
+            # ax_agents.set_xlim(0, 0.5)
+            # ax_agents.set_ylim(0, 1.0)
+            # ax_agents.set_title(f"Episode {episode + 1}: Agent Simulation")
+            # ax_agents.set_xlabel("X")
+            # ax_agents.set_ylabel("Y")
+            # ax_agents.plot(pos1_x, pos1_y, color="red", label="Agent 1 Path")
+            # ax_agents.plot(pos2_x, pos2_y, color="blue", label="Agent 2 Path")
+            # ax_agents.scatter(env.agent1_goal[0], env.agent1_goal[1], color="red", marker="x", label="Agent 1 Goal")
+            # ax_agents.scatter(env.agent2_goal[0], env.agent2_goal[1], color="blue", marker="x", label="Agent 2 Goal")
+            # ax_agents.scatter(state1[0], state1[1], color="red", s=50)
+            # ax_agents.scatter(state2[0], state2[1], color="blue", s=50)
+            # ax_agents.legend()
+
             try:
                 plt.pause(0.01)
             except KeyboardInterrupt:
                 signal_handler(None, None)
-            if done:
+
+            if done1 and done2:
                 break
 
-        episode_rewards_agent1.append(episode_reward1)
-        episode_rewards_agent2.append(episode_reward2)
+        episode_rewards_1.append(episode_reward1)
+        episode_rewards_2.append(episode_reward2)
 
-        ax_rewards.clear()
-        ax_rewards.set_xlabel("Episode")
-        ax_rewards.set_ylabel("Total Reward")
-        ax_rewards.set_title("Total Rewards per Episode (Agent1 & Agent2)")
-        ax_rewards.plot(range(1, len(episode_rewards_agent1) + 1), episode_rewards_agent1, color="red", label="Agent 1")
-        ax_rewards.plot(range(1, len(episode_rewards_agent2) + 1), episode_rewards_agent2, color="blue", label="Agent 2")
-        ax_rewards.legend()
+        # ax_rewards.clear()
+        # ax_rewards.set_title("Reward per Episode for Both Agents")
+        # ax_rewards.set_xlabel("Episode")
+        # ax_rewards.set_ylabel("Reward")
+        # ax_rewards.plot(episode_rewards_1, label="Agent 1")
+        # ax_rewards.plot(episode_rewards_2, label="Agent 2")
+        # ax_rewards.legend()
+
         try:
             plt.pause(0.01)
         except KeyboardInterrupt:
             signal_handler(None, None)
 
         print(f"Episode {episode + 1}: Agent1 Reward = {episode_reward1}, Agent2 Reward = {episode_reward2}")
+        if (episode + 1) % 100 == 0:
+            agent1.save_checkpoint("agent1_checkpoint.pth", global_steps)
+            agent2.save_checkpoint("agent2_checkpoint.pth", global_steps)
 
-        # Save checkpoints periodically (e.g., every 20 episodes)
-        if (episode + 1) % 20 == 0:
-            sac_agent1.save_checkpoint("sac_agent1_checkpoint.pth", global_steps)
-            sac_agent2.save_checkpoint("sac_agent2_checkpoint.pth", global_steps)
-
+    # plt.ioff()
     while True:
         user_input = input("Press 1 to close the figures: ")
         if user_input == "1":
